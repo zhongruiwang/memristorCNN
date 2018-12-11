@@ -4,18 +4,26 @@ The MATLAB framework to implement the 5-level CNN and 3-level ConvLSTM, for the 
 
 Wang, Z. et al. In situ training of feedforward and recurrent convolutional networks with memristors.
 
+
+# Contributions
+
+Authors(Alphabetic) : Daniel Belkin, Can Li, Yongyang Nie, Wenhao Song, Zhongrui Wang
+
+Advisors: Prof. J. Joshua Yang (Email: jjyang at umass dot edu, Website: http://www.ecs.umass.edu/ece/jjyang/); Prof. Qiangfei Xia (Email: qxia at umass dot edu, Website: http://nano.ecs.umass.edu); 
+
+
 # SYSTEM REQUIREMENT
 
 The codes have been tested on Mathworks Matlab R2017b.
 
 # DEMO
 
-Run the script in 'demo' folder.
+Run the script in 'scripts' folder.
 The codes that interface the hardware is not provided. 
 
 # INSTRUCTION
 
-The real_array backend are dependent on the measurement system and hardware. 
+The real_array2_conv backend are dependent on the measurement system and hardware. 
 The experimental data will be provided upon reasonable request.
 
 # LICENSE
@@ -24,10 +32,6 @@ Copyright (c) 2018,
 Department of Electrical and Computer Engineering, University of Massachusetts Amherst
 All rights reserved.
                       
-Authors(Alphabetic) : Daniel Belkin, Can Li, Yongyang Nie, Wenhao Song, Zhongrui Wang
-
-Advisors: Prof. J. Joshua Yang (Email: jjyang at umass dot edu, Website: http://www.ecs.umass.edu/ece/jjyang/); Prof. Qiangfei Xia (Email: qxia at umass dot edu, Website: http://nano.ecs.umass.edu); 
-
 LICENSE
 
 The MIT License (MIT)
