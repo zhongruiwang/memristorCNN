@@ -6,8 +6,11 @@
 %     Verticle differential pair with conv2d and conv2dlstm support. 
 % v5: allows conv2d and conv2dlstm have repeated vertical differential
 %     pairs.
+% v6: Support large dense layer (use a single integer for "dp_rep")
 
-classdef xbar_v5 < backend
+classdef xbar_v6 < backend
+
+    
     properties
         base        % multi_array object
         dp_rep      % Differential pair repetations (row / column-wise)
@@ -19,25 +22,20 @@ classdef xbar_v5 < backend
         th_set = 0;
         th_reset = -0; % Should be negative
         
-%         Vg0 = 1.1;      % Initial SET gate voltage
-        Vg0 = 1.1;      % Initial SET gate voltage (old)
-%         Vg_max = 1.5;   % Max SET gate voltage
-        Vg_max = 1.8;   % Max SET gate voltage (old)
-%         Vg_min = 0.7;   % Min SET gate voltage 
-        Vg_min = 0.4;
+        Vg0 = 1.1;      % Initial SET gate voltage
+        Vg_max = 1.8;   % Max SET gate voltage
+        Vg_min = 0.4;   % Min SET gate voltage
 
         V_set = 2.5;    % Fixed SET voltage
-        V_reset = 1.7;  % Fixed RESET voltage
+        V_reset = 1.8;  % Fixed RESET voltage
         V_gate_reset = 5; % Fixed RESET gate voltage
         
         % Read parameters
         V_read = 0.2;
         
         % Mapping (Conductance to weight, Gate voltage to conductance)
-%         ratio_G_W = 200e-6;     % Early test 100 to 250e-6
-        ratio_G_W = 100e-6;     % Early test 100 to 250e-6 (old)
-%         ratio_Vg_G = 1/100e-6;  % Delta_V_gate / Delta_conductancd
-        ratio_Vg_G = 1/98e-6;  % Delta_V_gate / Delta_conductancd (old)
+        ratio_G_W = 100e-6;    % Early test 100 to 250e-6
+        ratio_Vg_G = 1/98e-6;  % Delta_V_gate / Delta_conductancd ~1/98e-6
         
         % the array conductance for multiply reverse
         % update the value after weight update
@@ -60,7 +58,7 @@ classdef xbar_v5 < backend
     end
     methods
         %%
-        function obj = xbar_v5( base )
+        function obj = xbar_v6( base )
             obj.base = base;
         end
         
@@ -77,20 +75,28 @@ classdef xbar_v5 < backend
                 layer = numel( obj.base.subs )+1;
                 obj.phys_layer_num(layer_original) = layer;
                 
-                % Differential pair (vertical) repeats                
-                phys_size = fliplr(weight_dim) .* [2, 1] .* dp_rep;
-                obj.dp_rep{layer} = dp_rep;
+                if numel(dp_rep) == 2
                 
-                % Is this layer need to be chopped (valid to FC only)
-                temp = phys_size(1)/obj.base.net_size(1);
-                if and(temp>1, temp<=2) % 0.5*tot_rows
-                    obj.dp_exceed(layer) = 1;
-                    phys_size = phys_size.*[0.5, 2];
-                elseif temp<=1
+                    % Differential pair (vertical) repeats
+                    phys_size = fliplr(weight_dim) .* [2, 1] .* dp_rep;
+                    obj.dp_rep{layer} = dp_rep;
                     obj.dp_exceed(layer) = 0;
+                    
+                elseif mod(dp_rep, 2) == 0 % Must be even number for vertical DP
+
+                    % Dense layer to be chopped                                                            
+                    phys_size = fliplr(weight_dim) .* [2, 1]; % Ideal size                    
+                    temp = ceil(phys_size(1)/dp_rep); % Width multiplier                    
+                    % Definition of dp_rep in this case:
+                    % dp_rep(1:2): physical rows, physical column per chuck
+                    % dp_rep(3:4): chucks, padding length
+                    obj.dp_rep{layer} = [dp_rep, phys_size(2), temp, dp_rep*temp - phys_size(1)];                    
+                    phys_size = [dp_rep, temp * phys_size(2)];
+                    obj.dp_exceed(layer) = 1; % The flag (chop used)
+                    
                 else
-                    error('Do not support this DP configuration yet');
-                end
+                    error('dp_rep : a pair of int or an even int');
+                end                                    
                 
                 % Physically allocate the layer
                 obj.base.add_sub(net_corner, phys_size);
@@ -143,20 +149,19 @@ classdef xbar_v5 < backend
                 
                 % Vertical differential pair
                 dV = NaN(size(dV_temp).*[2 1]);
-                dV(1:2:end-1,:) = dV_temp; dV(2:2:end,:) = -dV_temp;
+                dV(1:2:end-1,:) = dV_temp; dV(2:2:end,:) = -dV_temp;                
                 
-                % Determine how to update:---------------------------------                
-%                 if layer ~= numel(dWs)
-%                     dV = dV*0;
-%                 end
-                % ---------------------------------------------------------
-                
-                % Repeats of differential pairs
-                dV = repmat(dV, obj.dp_rep{layer});
-                
-                % (FC only) If the layer is chopped 
-                if obj.dp_exceed(layer) == 1
-                    dV = [dV(1:end/2,:), dV(end/2+1:end,:)];
+                % Case 1 : No layer chop
+                if obj.dp_exceed(layer) == 0                    
+                    % Repeats of differential pairs
+                    dV = repmat(dV, obj.dp_rep{layer});             
+                else % Case 2 : FC only, chopped layer
+                    % Pad the dV matrix
+                    dV_pad = padarray(dV, [obj.dp_rep{layer}(4), 0], 0, 'post');
+                    % Split dV_pad into multiple vertical chucks
+                    dV_pad_chuck = mat2cell(dV_pad, obj.dp_rep{layer}(1) *...
+                        ones(1, obj.dp_rep{layer}(3)), obj.dp_rep{layer}(2));
+                    dV = cell2mat(dV_pad_chuck');
                 end
 
                 % RESET if dV is negative (or <th_reset)
@@ -239,20 +244,29 @@ classdef xbar_v5 < backend
             V_input(1:2:end-1,:)=vec.*voltage_scaling_matrix;
             V_input(2:2:end,:)=-V_input(1:2:end-1,:);
             
-            V_input = repmat(V_input, obj.dp_rep{layer}(1), 1);
-            
-            % If the layer is chopped
-            if obj.dp_exceed(layer) == 1            
-                I_output_chop1 = obj.base.subs{layer}.read_current(V_input(1:end/2,:), 'gain', 2 );
-                I_output_chop2 = obj.base.subs{layer}.read_current(V_input(end/2+1:end,:), 'gain', 2);
-                I_output = I_output_chop1(1:end/2, :) + I_output_chop2(end/2+1:end, :);
-            else
-                I_output = obj.base.subs{ layer }.read_current( V_input, 'gain', 2 );                
-            end
-            
-            % From repeated blocks back to averaged single block
-            I_output = reshape(I_output, size(I_output,1)/obj.dp_rep{layer}(2), obj.dp_rep{layer}(2), size(I_output,2) );
-            I_output = squeeze(mean(I_output, 2))/obj.dp_rep{layer}(1); % This change bug does not matter to previous FC layer since no vertical repeation
+            % Case 1, no FC chop
+            if obj.dp_exceed(layer) == 0
+                % Repeat V_input (dp_rep vertical duplication)
+                V_input = repmat(V_input, obj.dp_rep{layer}(1), 1);
+                I_output = obj.base.subs{layer}.read_current( V_input, 'gain', 2 );
+                % Make repeated horizontal blocks to be averaged
+                I_output = reshape(I_output, size(I_output,1)/obj.dp_rep{layer}(2), obj.dp_rep{layer}(2), size(I_output,2) );
+                I_output = squeeze(mean(I_output, 2))/obj.dp_rep{layer}(1); % A bug fixed on vertical blocks, but it does not affect early results.
+            else % Case 2, if the FC layer is chopped
+                
+                % Pad the V_input matrix
+                V_input_pad = padarray(V_input, [obj.dp_rep{layer}(4), 0], 0, 'post');
+                % Split V_input into multiple vertical chucks
+                V_input_chuck = mat2cell(V_input_pad, obj.dp_rep{layer}(1)*ones(1, obj.dp_rep{layer}(3)), size(V_input, 2));
+                % Initialize output currents ( dp_rep(2): single chuck width)
+                I_output = zeros(obj.dp_rep{layer}(2), size(V_input,2));
+                for j = 1:obj.dp_rep{layer}(3) % The number of chucks
+                    temp = obj.base.subs{layer}.read_current(V_input_chuck{j}, 'gain', 2 );
+                    % Keep the columns of the specific chuck
+                    temp = temp((j-1)*obj.dp_rep{layer}(2)+1 : j*obj.dp_rep{layer}(2), :);
+                    I_output = I_output + temp;
+                end                
+            end            
             
             % Scaling back (voltage and weight scaling)
             output = I_output ./ voltage_scaling / obj.ratio_G_W;
@@ -286,7 +300,7 @@ classdef xbar_v5 < backend
             end
             
             % Hardware call
-            output = obj.base.subs{ layer }.xcorr3d(obj.dp_rep{layer},...
+            output = obj.base.subs{layer}.xcorr3d(obj.dp_rep{layer},...
                 input, bias_config, kernel_size, output_dim, strides);
             
             % Scaling back (G based calculation to W based, ratio_G_w)
@@ -321,7 +335,7 @@ classdef xbar_v5 < backend
             end
             
             % Hardware call
-            output = obj.base.subs{ layer }.xcorr3dLSTM(obj.dp_rep{layer},...
+            output = obj.base.subs{layer}.xcorr3dLSTM(obj.dp_rep{layer},...
                 input_x, input_h, bias_config, kernel_size_x,...
                 kernel_size_h, output_dim, strides_x);
             
@@ -352,21 +366,27 @@ classdef xbar_v5 < backend
             % Retrieve last read G
             G = obj.array_G{layer};
             
-            % If there is layer chopping
-            if obj.dp_exceed(layer) == 1
-                G = [G(:,1:end/2); G(:,end/2+1:end)];
-            end
-            
             % Reduce from the vertical differential pair to a single scalar
             w = G(1:2:end-1,:)-G(2:2:end,:);
             
-            % From multiple DP back to single DP
-            if ~isequal(obj.dp_rep{layer}, [1,1])
-                temp = mat2cell(w, ones(1, obj.dp_rep{layer}(1))*size(w,1)/obj.dp_rep{layer}(1),...
-                    ones(1, obj.dp_rep{layer}(2))*size(w,2)/obj.dp_rep{layer}(2)); % Break the G into sub-blocks
-                temp = reshape(temp(:), 1 , 1, numel(temp));                
-                w = mean(cell2mat(temp),3);
-            end
+            % Case 1 : No layer chopping
+            if obj.dp_exceed(layer) == 0                
+                % From multiple DP blocks back to single DP
+                if ~isequal(obj.dp_rep{layer}, [1,1])
+                    temp = mat2cell(w, ones(1, obj.dp_rep{layer}(1))*size(w,1)/obj.dp_rep{layer}(1),...
+                        ones(1, obj.dp_rep{layer}(2))*size(w,2)/obj.dp_rep{layer}(2)); % Break the G into sub-blocks
+                    temp = reshape(temp(:), 1 , 1, numel(temp));                
+                    w = mean(cell2mat(temp),3);
+                end                
+            else % Case 2 : If there is layer chopping                
+                
+                % Split w into multiple horizontal chucks (Note w is of half rows of G)
+                w_chuck = mat2cell(w, obj.dp_rep{layer}(1)/2, obj.dp_rep{layer}(2)...
+                    * ones(1, obj.dp_rep{layer}(3)));
+                w_temp = cell2mat(w_chuck');                
+                % Remove padding (Note w is of half rows of G)
+                w = w_temp(1:end-obj.dp_rep{layer}(4)/2, :);
+            end                                               
             
             % Reverse multiplication
             output = w * vec / obj.ratio_G_W; % w is tranposed compared to upper level algorithrms
@@ -423,7 +443,7 @@ classdef xbar_v5 < backend
                             dy_select = dy(dy_row_select,dy_col_select,:,sampleID);
                             % Dim: rows * cols * 1 * kernel_numbers
                             kernel_select = kernel(kernel_row_select, kernel_col_select,depth,:);
-                            
+                                                        
                             temp = dy_select(:).*kernel_select(:);
                             
                             output(row-pad_size_pre(1),col-pad_size_pre(2),depth,sampleID)= sum(temp(:));
